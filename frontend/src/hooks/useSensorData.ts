@@ -42,6 +42,53 @@ export interface Alert {
   timestamp: number;
 }
 
+// --- Demo fallback data when backend is unavailable ---
+function generateDemoData() {
+  const now = Date.now();
+  const history: HistoricalData[] = Array.from({ length: 48 }, (_, i) => {
+    const t = now - (47 - i) * 30 * 60 * 1000;
+    const hour = new Date(t).getHours();
+    const base = 45 + Math.sin(hour / 4) * 15;
+    return {
+      timestamp: t,
+      moisture: parseFloat((base + (Math.random() - 0.5) * 8).toFixed(1)),
+      temperature: parseFloat((26 + Math.sin(hour / 3.8) * 6 + (Math.random() - 0.5) * 2).toFixed(1)),
+      humidity: parseFloat((60 + Math.sin(hour / 5) * 15 + (Math.random() - 0.5) * 5).toFixed(1)),
+    };
+  });
+
+  const latest: SensorReading = {
+    moisture: history[history.length - 1].moisture,
+    temperature: history[history.length - 1].temperature,
+    humidity: history[history.length - 1].humidity,
+    rain: 0,
+    timestamp: now,
+  };
+
+  const demoAlerts: Alert[] = [
+    {
+      id: '1',
+      type: 'info',
+      message: 'Running in demo mode — connect IoT sensors for live data',
+      timestamp: now - 60000,
+    },
+    {
+      id: '2',
+      type: 'warning',
+      message: 'Soil moisture below optimal threshold (< 35%)',
+      timestamp: now - 300000,
+    },
+    {
+      id: '3',
+      type: 'info',
+      message: 'Weather forecast: Thunderstorm expected tomorrow',
+      timestamp: now - 600000,
+    },
+  ];
+
+  return { latest, history, alerts: demoAlerts };
+}
+
 export function useSensorData() {
   const [latestReading, setLatestReading] = useState<SensorReading | null>(null);
   const [historicalData, setHistoricalData] = useState<HistoricalData[]>([]);
@@ -49,6 +96,7 @@ export function useSensorData() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isDemo, setIsDemo] = useState(false);
 
   // -------- HISTORY --------
   const fetchHistory = useCallback(async () => {
@@ -57,6 +105,7 @@ export function useSensorData() {
 
     const res = await axios.get(`${API_BASE}/api/farms/${FARM_ID}/history`, {
       params: { from, to: now },
+      timeout: 3000,
     });
 
     const normalized = res.data.map((raw: RawReading) => ({
@@ -75,7 +124,9 @@ export function useSensorData() {
 
   // -------- ALERTS --------
   const fetchAlerts = useCallback(async () => {
-    const res = await axios.get(`${API_BASE}/api/farms/${FARM_ID}/alerts`);
+    const res = await axios.get(`${API_BASE}/api/farms/${FARM_ID}/alerts`, {
+      timeout: 3000,
+    });
 
     const normalized = res.data.map((raw: RawAlert) => ({
       id: raw.id ?? crypto.randomUUID(),
@@ -92,14 +143,21 @@ export function useSensorData() {
     setAlerts(normalized);
   }, []);
 
-  // -------- INITIAL LOAD --------
+  // -------- INITIAL LOAD (with demo fallback) --------
   useEffect(() => {
     const load = async () => {
       setIsLoading(true);
       try {
         await Promise.all([fetchHistory(), fetchAlerts()]);
       } catch {
-        setError('Failed to load initial data');
+        // Backend unreachable — switch to demo mode
+        console.log('Backend unavailable, loading demo data...');
+        const demo = generateDemoData();
+        setLatestReading(demo.latest);
+        setHistoricalData(demo.history);
+        setAlerts(demo.alerts);
+        setIsDemo(true);
+        setError(null); // Don't show error in demo mode
       } finally {
         setIsLoading(false);
       }
@@ -107,9 +165,31 @@ export function useSensorData() {
     load();
   }, [fetchHistory, fetchAlerts]);
 
-  // -------- SOCKET.IO --------
+  // -------- SOCKET.IO (skip in demo mode) --------
   useEffect(() => {
-    const socket = io(API_BASE, { transports: ['polling'] });
+    if (isDemo) {
+      // In demo mode, simulate live connection appearance
+      setIsConnected(true);
+
+      // Simulate periodic sensor updates
+      const interval = setInterval(() => {
+        setLatestReading(prev => {
+          if (!prev) return prev;
+          const hour = new Date().getHours();
+          return {
+            moisture: parseFloat((prev.moisture + (Math.random() - 0.5) * 2).toFixed(1)),
+            temperature: parseFloat((26 + Math.sin(hour / 3.8) * 6 + (Math.random() - 0.5) * 1).toFixed(1)),
+            humidity: parseFloat((prev.humidity + (Math.random() - 0.5) * 1.5).toFixed(1)),
+            rain: 0,
+            timestamp: Date.now(),
+          };
+        });
+      }, 5000);
+
+      return () => clearInterval(interval);
+    }
+
+    const socket = io(API_BASE, { transports: ['polling'], timeout: 3000 });
 
     socket.on('connect', () => {
       setIsConnected(true);
@@ -162,7 +242,7 @@ export function useSensorData() {
       socket.disconnect();
     };
 
-  }, []);
+  }, [isDemo]);
 
   return {
     latestReading,
